@@ -1,0 +1,221 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity sha256_core is
+    generic(
+        RESET_VAL : std_logic := '0'  -- valeur de réinitialisation
+    );
+    port(
+        clk : in std_logic;
+        reset: in std_logic;
+        start : in std_logic;  -- signal pour démarrer le processus de hachage
+        num_blocks : in natural;  -- nombre de blocs de message
+        message_block : in std_logic_vector(511 downto 0);  -- bloc de message de 512 bits
+        done : out std_logic;  -- signal indiquant la fin du processus de hachage
+        hash_value : out std_logic_vector(255 downto 0)  -- valeur de hachage SHA-256
+    );
+end entity;
+
+architecture behavior of sha256_core is
+
+    -- Constantes de l'algorithme SHA-256
+    type k_data is array (0 to 63) of std_logic_vector(31 downto 0);
+    constant k_constants : k_data := (
+        X"428a2f98", X"71374491", X"b5c0fbcf", X"e9b5dba5", X"3956c25b", X"59f111f1", X"923f82a4", X"ab1c5ed5",
+        X"d807aa98", X"12835b01", X"243185be", X"550c7dc3", X"72be5d74", X"80deb1fe", X"9bdc06a7", X"c19bf174",
+        X"e49b69c1", X"efbe4786", X"0fc19dc6", X"240ca1cc", X"2de92c6f", X"4a7484aa", X"5cb0a9dc", X"76f988da",
+        X"983e5152", X"a831c66d", X"b00327c8", X"bf597fc7", X"c6e00bf3", X"d5a79147", X"06ca6351", X"14292967",
+        X"27b70a85", X"2e1b2138", X"4d2c6dfc", X"53380d13", X"650a7354", X"766a0abb", X"81c2c92e", X"92722c85",
+        X"a2bfe8a1", X"a81a664b", X"c24b8b70", X"c76c51a3", X"d192e819", X"d6990624", X"f40e3585", X"106aa070",
+        X"19a4c116", X"1e376c08", X"2748774c", X"34b0bcb5", X"391c0cb3", X"4ed8aa4a", X"5b9cca4f", X"682e6ff3",
+        X"748f82ee", X"78a5636f", X"84c87814", X"8cc70208", X"90befffa", X"a4506ceb", X"bef9a3f7", X"c67178f2"
+    );
+
+    signal round_counter : natural := 0;
+    signal block_counter : natural := 0;
+    signal step_counter : natural := 0;
+    constant max_steps : natural := 64;
+
+    signal temp1, temp2 : std_logic_vector(31 downto 0) := (others => '0');
+
+    -- Variables de travail pour les 8 mots de 32 bits
+    signal a, b, c, d, e, f, g, h : std_logic_vector(31 downto 0) := (others => '0');
+
+    -- Constantes de l'algorithme SHA-256
+    signal w_schedule : k_data := (others => (others => '0'));  -- Tableau pour le plan de message
+    signal message_blocks : k_data;
+    signal hash_values : k_data := (
+        X"6a09e667", X"bb67ae85", X"3c6ef372", X"a54ff53a", X"510e527f", X"9b05688c", X"1f83d9ab", X"5be0cd19"
+    );
+
+    type sha256_state is (remettre, IDLE, READ_BLOCK, SCHED, HASHING, fini);
+    signal curr_state, next_state : sha256_state := remettre;
+
+    -- Fonctions de l'algorithme SHA-256
+    function rotr(x : std_logic_vector; n : integer) return std_logic_vector is
+    begin
+        return x(x'left downto x'left - n + 1) & x(x'left - n downto x'right);
+    end function;
+
+    function sigma_0(x : std_logic_vector) return std_logic_vector is
+    begin
+        return std_logic_vector(unsigned(rotr(x, 2)) xor unsigned(rotr(x, 13)) xor unsigned(rotr(x, 22)));
+    end function;
+
+    function sigma_1(x : std_logic_vector) return std_logic_vector is
+    begin
+        return std_logic_vector(unsigned(rotr(x, 6)) xor unsigned(rotr(x, 11)) xor unsigned(rotr(x, 25)));
+    end function;
+
+    function ch(x, y, z : std_logic_vector) return std_logic_vector is
+    begin
+        return std_logic_vector((unsigned(x) and unsigned(y)) xor (not unsigned(x) and unsigned(z)));
+    end function;
+
+    function maj(x, y, z : std_logic_vector) return std_logic_vector is
+    begin
+        return std_logic_vector((unsigned(x) and unsigned(y)) xor (unsigned(x) and unsigned(z)) xor (unsigned(y) and unsigned(z)));
+    end function;
+
+begin
+    -- Logique de mise à jour de l'état
+    process(clk, reset)
+    begin
+        if reset = RESET_VAL then
+            curr_state <= remettre;
+        elsif rising_edge(clk) then
+            curr_state <= next_state;
+        end if;
+    end process;
+
+    -- Logique de transition des états
+    process(curr_state, reset, num_blocks, round_counter, step_counter, start)
+    begin
+        case curr_state is
+            when remettre =>
+                if reset = RESET_VAL then
+                    next_state <= remettre;
+                else
+                    next_state <= IDLE;
+                end if;
+            when IDLE =>
+                if start = '1' then
+                    next_state <= READ_BLOCK;
+                else
+                    next_state <= IDLE;
+                end if;
+            when READ_BLOCK =>
+                next_state <= SCHED;
+            when SCHED =>
+                if step_counter < 16 then
+                    next_state <= HASHING;
+                else
+                    next_state <= fini;
+                end if;
+            when HASHING =>
+                if step_counter < max_steps - 1 then
+                    next_state <= SCHED;
+                else
+                    if round_counter < num_blocks - 1 then
+                        next_state <= READ_BLOCK;
+                    else
+                        next_state <= fini;
+                    end if;
+                end if;
+            when fini =>
+                next_state <= fini;
+        end case;
+    end process;
+
+    -- Logique de mise à jour des valeurs de hachage et des compteurs
+    process(clk, reset)
+    begin
+        if reset = RESET_VAL then
+            round_counter <= 0;
+            block_counter <= 0;
+            step_counter <= 0;
+            hash_values <= (
+                X"6a09e667", X"bb67ae85", X"3c6ef372", X"a54ff53a", X"510e527f", X"9b05688c", X"1f83d9ab", X"5be0cd19"
+            );
+        elsif rising_edge(clk) then
+            case curr_state is
+                when remettre =>
+                    hash_values <= (
+                        X"6a09e667", X"bb67ae85", X"3c6ef372", X"a54ff53a", X"510e527f", X"9b05688c", X"1f83d9ab", X"5be0cd19"
+                    );
+                    step_counter <= 0;
+                    round_counter <= 0;
+                when IDLE =>
+                    null;
+                when READ_BLOCK =>
+                    if round_counter = 0 then
+                        hash_values <= (
+                            X"6a09e667", X"bb67ae85", X"3c6ef372", X"a54ff53a", X"510e527f", X"9b05688c", X"1f83d9ab", X"5be0cd19"
+                        );
+                    end if;
+                    for i in 0 to 15 loop
+                        message_blocks(i) <= message_block(511 - i*32 downto 480 - i*32);
+                    end loop;
+                    step_counter <= 0;
+                when SCHED =>
+                    if step_counter < 16 then
+                        w_schedule(step_counter) <= message_blocks(step_counter);
+                    else
+                        w_schedule(step_counter) <= std_logic_vector(
+                            unsigned(w_schedule(step_counter - 16)) +
+                            unsigned(w_schedule(step_counter - 7)) +
+                            unsigned(rotr(w_schedule(step_counter - 15), 7) xor rotr(w_schedule(step_counter - 15), 18) xor (w_schedule(step_counter - 15)(31 downto 3))) +
+                            unsigned(rotr(w_schedule(step_counter - 2), 17) xor rotr(w_schedule(step_counter - 2), 19) xor (w_schedule(step_counter - 2)(31 downto 10)))
+                        );
+                    end if;
+                    step_counter <= step_counter + 1;
+                when HASHING =>
+                    if step_counter = 0 then
+                        a <= hash_values(0);
+                        b <= hash_values(1);
+                        c <= hash_values(2);
+                        d <= hash_values(3);
+                        e <= hash_values(4);
+                        f <= hash_values(5);
+                        g <= hash_values(6);
+                        h <= hash_values(7);
+                    end if;
+                    temp1 <= std_logic_vector(
+                        unsigned(h) + unsigned(sigma_1(e)) +
+                        unsigned(ch(e, f, g)) + unsigned(k_constants(step_counter)) + unsigned(w_schedule(step_counter))
+                    );
+                    temp2 <= std_logic_vector(unsigned(sigma_0(a)) + unsigned(maj(a, b, c)));
+                    h <= g;
+                    g <= f;
+                    f <= e;
+                    e <= std_logic_vector(unsigned(d) + unsigned(temp1));
+                    d <= c;
+                    c <= b;
+                    b <= a;
+                    a <= std_logic_vector(unsigned(temp1) + unsigned(temp2));
+                    step_counter <= step_counter + 1;
+                    if step_counter = max_steps then
+                        hash_values(0) <= std_logic_vector(unsigned(hash_values(0)) + unsigned(a));
+                        hash_values(1) <= std_logic_vector(unsigned(hash_values(1)) + unsigned(b));
+                        hash_values(2) <= std_logic_vector(unsigned(hash_values(2)) + unsigned(c));
+                        hash_values(3) <= std_logic_vector(unsigned(hash_values(3)) + unsigned(d));
+                        hash_values(4) <= std_logic_vector(unsigned(hash_values(4)) + unsigned(e));
+                        hash_values(5) <= std_logic_vector(unsigned(hash_values(5)) + unsigned(f));
+                        hash_values(6) <= std_logic_vector(unsigned(hash_values(6)) + unsigned(g));
+                        hash_values(7) <= std_logic_vector(unsigned(hash_values(7)) + unsigned(h));
+                        round_counter <= round_counter + 1;
+                        step_counter <= 0;
+                    end if;
+                when fini =>
+                    null;
+            end case;
+        end if;
+    end process;
+
+    -- Sorties
+    done <= '1' when curr_state = fini else '0';
+    hash_value <= hash_values(0) & hash_values(1) & hash_values(2) & hash_values(3) &
+                  hash_values(4) & hash_values(5) & hash_values(6) & hash_values(7);
+
+end architecture;
